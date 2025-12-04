@@ -268,3 +268,109 @@ Vete a la máquina cliente (`c1` o `c2`).
     dig @192.168.57.10 c2.micasa.es
     # Debe devolver la IP del cliente 2
     ```
+
+
+    *comandos*
+    1. EN EL SERVIDOR (Server) (vagrant ssh server)
+    # 1. Obtener root y actualizar
+sudo -i
+apt update && apt install -y bind9 bind9utils bind9-doc dnsutils
+
+# 2. Forzar IPv4 en Bind9
+sed -i 's/OPTIONS=.*/OPTIONS="-u bind -4"/' /etc/default/named
+
+# 3. Copia de seguridad y Configuración Global (Options)
+cp /etc/bind/named.conf.options /etc/bind/named.conf.options.backup
+
+cat <<EOF > /etc/bind/named.conf.options
+acl confiables {
+    192.168.57.0/24;
+    127.0.0.0/8;
+};
+
+options {
+    directory "/var/cache/bind";
+
+    forwarders {
+        8.8.8.8;
+        8.8.4.4;
+    };
+
+    listen-on port 53 { 192.168.57.10; };
+    allow-transfer { none; };
+    recursion yes;
+    allow-recursion { confiables; };
+    dnssec-validation yes;
+};
+EOF
+
+# 4. Declarar Zonas (named.conf.local)
+cat <<EOF > /etc/bind/named.conf.local
+zone "micasa.es" {
+    type master;
+    file "/var/lib/bind/db.micasa.es";
+};
+
+zone "57.168.192.in-addr.arpa" {
+    type master;
+    file "/var/lib/bind/db.192.168.57";
+};
+EOF
+
+# 5. Crear Archivo de Zona Directa
+# Usamos 'EOF' entre comillas para respetar las variables $TTL
+cat <<'EOF' > /var/lib/bind/db.micasa.es
+$TTL    86400
+@       IN      SOA     server.micasa.es. admin.micasa.es. (
+                        2         ; Serial
+                        604800    ; Refresh
+                        86400     ; Retry
+                        2419200   ; Expire
+                        86400 )   ; Negative Cache TTL
+;
+@       IN      NS      server.micasa.es.
+@       IN      A       192.168.57.10
+server  IN      A       192.168.57.10
+c1      IN      A       192.168.57.25
+c2      IN      A       192.168.57.4
+EOF
+
+# 6. Crear Archivo de Zona Inversa
+cat <<'EOF' > /var/lib/bind/db.192.168.57
+$TTL    86400
+@       IN      SOA     server.micasa.es. admin.micasa.es. (
+                        2         ; Serial
+                        604800    ; Refresh
+                        86400     ; Retry
+                        2419200   ; Expire
+                        86400 )   ; Negative Cache TTL
+;
+@       IN      NS      server.micasa.es.
+10      IN      PTR     server.micasa.es.
+4       IN      PTR     c2.micasa.es.
+EOF
+
+# 7. Verificar sintaxis
+echo "--- Verificando Configuración ---"
+named-checkconf
+named-checkzone micasa.es /var/lib/bind/db.micasa.es
+named-checkzone 57.168.192.in-addr.arpa /var/lib/bind/db.192.168.57
+
+# 8. Reiniciar servicio
+systemctl restart bind9
+systemctl status bind9 --no-pager
+
+2. EN EL CLIENTE (Pruebas) (vagrant ssh c1)
+# 1. Configurar DNS temporalmente (para asegurar que preguntamos al server)
+# Ojo: esto se borra al reiniciar si usas DHCP, pero sirve para el test.
+sudo bash -c 'echo "nameserver 192.168.57.10" > /etc/resolv.conf'
+
+# 2. Pruebas de resolución (deben dar respuesta correcta)
+echo "--- Probando ping por nombre ---"
+ping -c 2 server.micasa.es
+
+echo "--- Probando resolución inversa de c2 ---"
+dig -x 192.168.57.4 +short
+
+echo "--- Probando nslookup ---"
+nslookup server.micasa.es
